@@ -41,6 +41,16 @@ import org.apache.cassandra.exceptions.*;
 import org.apache.cassandra.serializers.SetSerializer;
 import org.apache.cassandra.serializers.UTF8Serializer;
 import org.apache.cassandra.service.ClientState;
+import java.lang.management.ManagementFactory;
+
+import javax.management.MBeanServer;
+import javax.management.MalformedObjectNameException;
+import javax.management.ObjectName;
+
+import org.apache.cassandra.cql3.QueryOptions;
+import org.apache.cassandra.cql3.QueryProcessor;
+import org.apache.cassandra.cql3.UntypedResultSet;
+import org.apache.cassandra.cql3.UntypedResultSet.Row;
 import org.apache.cassandra.service.QueryState;
 import org.apache.cassandra.transport.messages.ResultMessage;
 import org.apache.cassandra.utils.ByteBufferUtil;
@@ -62,6 +72,7 @@ public class CassandraAuthorizer implements IAuthorizer
     public static final String USERNAME = "username";
     public static final String USER_PERMISSIONS = "permissions";
 
+    private SelectStatement jmxAuthorizeStatement;
     private SelectStatement authorizeRoleStatement;
     private SelectStatement legacyAuthorizeRoleStatement;
 
@@ -354,6 +365,7 @@ public class CassandraAuthorizer implements IAuthorizer
     public void setup()
     {
         authorizeRoleStatement = prepare(ROLE, AuthKeyspace.ROLE_PERMISSIONS);
+        jmxAuthorizeStatement = prepareJMX(ROLE, AuthKeyspace.ROLE_PERMISSIONS);
 
         // If old user permissions table exists, migrate the legacy authz data to the new table
         // The delay is to give the node a chance to see its peers before attempting the conversion
@@ -374,6 +386,15 @@ public class CassandraAuthorizer implements IAuthorizer
     private SelectStatement prepare(String entityname, String permissionsTable)
     {
         String query = String.format("SELECT permissions FROM %s.%s WHERE %s = ? AND resource = ?",
+                                     AuthKeyspace.NAME,
+                                     permissionsTable,
+                                     entityname);
+        return (SelectStatement) QueryProcessor.getStatement(query, ClientState.forInternalCalls()).statement;
+    }
+
+    private SelectStatement prepareJMX(String entityname, String permissionsTable)
+    {
+        String query = String.format("SELECT resource,permissions FROM %s.%s WHERE %s = ?",
                                      AuthKeyspace.NAME,
                                      permissionsTable,
                                      entityname);
@@ -452,5 +473,120 @@ public class CassandraAuthorizer implements IAuthorizer
     private UntypedResultSet process(String query) throws RequestExecutionException
     {
         return QueryProcessor.process(query, ConsistencyLevel.LOCAL_ONE);
+    }
+
+    public Set<Permission> authorizeJMX(AuthenticatedUser user, IResource resource)
+    {
+        if (user.isSuper())
+            return resource.applicablePermissions();
+
+        UntypedResultSet result;
+        List<Row> accessRows = Lists.newArrayList();
+        for(RoleResource r : user.getRoles())
+        {
+            try
+            {
+                ResultMessage.Rows rows = jmxAuthorizeStatement.execute(QueryState.forInternalCalls(),
+                        QueryOptions.forInternalCalls(ConsistencyLevel.LOCAL_ONE,
+                                Arrays.asList(ByteBufferUtil.bytes(r.getRoleName()))));
+                result = UntypedResultSet.create(rows.result);
+                // Get all Permissions for a specific user.
+            }
+            catch (RequestValidationException e)
+            {
+                throw new AssertionError(e);
+            }
+            catch (RequestExecutionException e)
+            {
+                logger.warn("CassandraAuthorizer failed to authorize {} for {}", user, resource);
+                return Permission.NONE;
+            }
+
+          //Get all permission rows in the user permissions that apply to this resource
+            accessRows.addAll(getAccessRows(resource, result));
+        }
+
+        if (accessRows.isEmpty())
+            return Permission.NONE;
+
+        //Get all permissions from the relevant rows
+        return getPermissions(accessRows);
+    }
+
+    private Set<Permission> getPermissions(List<Row> accessRows)
+    {
+        Set<Permission> permissions = EnumSet.noneOf(Permission.class);
+        for (Row r : accessRows)
+        {
+            for (String perm : r.getSet(PERMISSIONS, UTF8Type.instance))
+                permissions.add(Permission.valueOf(perm));
+        }
+        return permissions;
+    }
+
+    private List<Row> getAccessRows(IResource resource, UntypedResultSet result)
+    {
+        List<Row> matchingRows = Lists.newArrayList();
+        ObjectName targetMBean;
+        Set<ObjectName> targetMbeans = null;
+        MBeanServer mbs = ManagementFactory.getPlatformMBeanServer();
+        boolean targetHasWildcard = false;
+        try
+        {
+            targetMBean = ObjectName.getInstance(resource.getName());
+            if (targetMBean.isPattern())
+            {
+                targetHasWildcard = true;
+                targetMbeans = mbs.queryNames(targetMBean, null);
+            }
+        }
+        catch (MalformedObjectNameException e)
+        {
+            return matchingRows;
+        }
+        for (Row r : result)
+        {
+            String rowResource = r.getString(RESOURCE);
+            if (rowResource.startsWith("mbean/")) // Only check Mbean resources in system_auth.permissions
+            {
+                rowResource = rowResource.substring(6); //Remove the "mbean/" from the String
+                try
+                {
+                    ObjectName mbean = ObjectName.getInstance(rowResource);
+                    if (targetHasWildcard)
+                    {
+                        if (targetMBean.equals(rowResource)) // If they are equal to each other we can skip the next check
+                            matchingRows.add(r);
+                        else
+                        {
+                            if (mbean.isPattern())
+                            {
+                                if (mbs.queryNames(new ObjectName(rowResource), null).containsAll(targetMbeans))
+                                    matchingRows.add(r);
+                            }
+                            else
+                            {
+                                if (mbean.apply(targetMBean))
+                                    matchingRows.add(r);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        if (mbean.apply(targetMBean))
+                            matchingRows.add(r);
+                    }
+                }
+                catch (MalformedObjectNameException e)
+                {
+                    logger.error("Malformed MBean in Permission set " + rowResource);
+                }
+            }
+            else if (rowResource.equals("mbean")) // Is it the root resource?
+            {
+                matchingRows.add(r);
+            }
+        }
+        return matchingRows;
     }
 }

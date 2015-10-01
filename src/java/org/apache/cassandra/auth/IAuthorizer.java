@@ -143,4 +143,13 @@ public interface IAuthorizer
      * For example, use this method to create any required keyspaces/column families.
      */
     void setup();
+
+    /**
+     * This method can be used to add authorization to JMX. Returns a set of Permissions.
+     *
+     * @param user Authenticated user requesting authorization.
+     * @param resource Resource for which the authorization is being requested. @see JMXResource.
+     * @return Set of permissions of the user on the resource. Should never return null. Use Permission.NONE instead.
+     */
+    Set<Permission> authorizeJMX(AuthenticatedUser user, IResource resource);
 }

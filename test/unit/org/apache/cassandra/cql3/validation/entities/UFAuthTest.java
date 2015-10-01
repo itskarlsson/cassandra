@@ -22,12 +22,12 @@ import java.util.*;
 
 import com.google.common.base.Joiner;
 import com.google.common.collect.ImmutableSet;
+
 import org.junit.Before;
 import org.junit.BeforeClass;
 import org.junit.Test;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-
 import org.apache.cassandra.auth.*;
 import org.apache.cassandra.config.DatabaseDescriptor;
 import org.apache.cassandra.cql3.Attributes;
@@ -723,6 +723,12 @@ public class UFAuthTest extends CQLTester
         public void setup()
         {
 
+        }
+
+        @Override
+        public Set<Permission> authorizeJMX(AuthenticatedUser parUser, IResource parResource)
+        {
+            return Permission.ALL_JMX;
         }
     }
 }

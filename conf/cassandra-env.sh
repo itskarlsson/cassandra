@@ -326,11 +326,12 @@ JVM_OPTS="$JVM_OPTS -Djava.net.preferIPv4Stack=true"
 # To enable remote JMX connections, uncomment lines below
 # with authentication and/or ssl enabled. See https://wiki.apache.org/cassandra/JmxSecurity 
 #
-LOCAL_JMX=yes
+# local, remote or advanced
+JMX=local
 
-if [ "$LOCAL_JMX" = "yes" ]; then
+if [ "$JMX" = "local" ]; then
   JVM_OPTS="$JVM_OPTS -Dcassandra.jmx.local.port=$JMX_PORT -XX:+DisableExplicitGC"
-else
+elif [ "$JMX" = "remote" ]; then
   JVM_OPTS="$JVM_OPTS -Dcom.sun.management.jmxremote.port=$JMX_PORT"
   JVM_OPTS="$JVM_OPTS -Dcom.sun.management.jmxremote.rmi.port=$JMX_PORT"
   JVM_OPTS="$JVM_OPTS -Dcom.sun.management.jmxremote.ssl=false"
@@ -344,6 +345,17 @@ else
 #  JVM_OPTS="$JVM_OPTS -Dcom.sun.management.jmxremote.registry.ssl=true"
 #  JVM_OPTS="$JVM_OPTS -Dcom.sun.management.jmxremote.ssl.enabled.protocols=<enabled-protocols>"
 #  JVM_OPTS="$JVM_OPTS -Dcom.sun.management.jmxremote.ssl.enabled.cipher.suites=<enabled-cipher-suites>"
+elif [ "$JMX" = "advanced" ]; then
+#Set the port to create a custom jmx server. Authenticatior and Authorization can then be set to use Cassandra
+#authorization and authentication on JMX.
+  JVM_OPTS="$JVM_OPTS -Dcassandra.jmx.port=$JMX_PORT"
+  JVM_OPTS="$JVM_OPTS -Dcassandra.jmx.host=localhost"
+#  JVM_OPTS="$JVM_OPTS -Dcassandra.jmx.authenticator=org.apache.cassandra.auth.JMXPasswordAuthenticator"
+#  JVM_OPTS="$JVM_OPTS -Dcassandra.jmx.mbeanforwarder=org.apache.cassandra.auth.JMXCassandraAuthorizer"
+#  JVM_OPTS="$JVM_OPTS -Djavax.net.ssl.keyStore=/path/to/keystore"
+#  JVM_OPTS="$JVM_OPTS -Djavax.net.ssl.keyStorePassword=<keystore-password>"
+#  JVM_OPTS="$JVM_OPTS -Djavax.net.ssl.trustStore=/path/to/truststore"
+#  JVM_OPTS="$JVM_OPTS -Djavax.net.ssl.trustStorePassword=<truststore-password>"
 fi
 
 # To use mx4j, an HTML interface for JMX, add mx4j-tools.jar to the lib/

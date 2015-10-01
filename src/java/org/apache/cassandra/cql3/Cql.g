@@ -910,12 +910,14 @@ listPermissionsStatement returns [ListPermissionsStatement stmt]
     ;
 
 permission returns [Permission perm]
-    : p=(K_CREATE | K_ALTER | K_DROP | K_SELECT | K_MODIFY | K_AUTHORIZE | K_DESCRIBE | K_EXECUTE)
+    : p=(K_CREATE | K_ALTER | K_DROP | K_SELECT | K_MODIFY | K_AUTHORIZE | K_DESCRIBE | K_EXECUTE | K_MBREAD
+    | K_MBWRITE | K_MBEXECUTE | K_MBINVOKE | K_MBINSTANCEOF | K_MBQUERYNAMES | K_MBGET | K_MBSET)
     { $perm = Permission.valueOf($p.text.toUpperCase()); }
     ;
 
 permissionOrAll returns [Set<Permission> perms]
-    : K_ALL ( K_PERMISSIONS )?       { $perms = Permission.ALL; }
+    : K_ALL ( K_PERMISSIONS )?       { $perms = Permission.ALL_DATA; }
+    | K_ALL K_MBEAN ( K_PERMISSIONS)?     { $perms = Permission.ALL_JMX; }
     | p=permission ( K_PERMISSION )? { $perms = EnumSet.of($p.perm); }
     ;
 
@@ -923,6 +925,7 @@ resource returns [IResource res]
     : d=dataResource { $res = $d.res; }
     | r=roleResource { $res = $r.res; }
     | f=functionResource { $res = $f.res; }
+    | j=jmxResource { $res = $j.res; }
     ;
 
 dataResource returns [DataResource res]
@@ -930,6 +933,11 @@ dataResource returns [DataResource res]
     | K_KEYSPACE ks = keyspaceName { $res = DataResource.keyspace($ks.id); }
     | ( K_COLUMNFAMILY )? cf = columnFamilyName
       { $res = DataResource.table($cf.name.getKeyspace(), $cf.name.getColumnFamily()); }
+    ;
+
+jmxResource returns [JMXResource res]
+    : K_ALL K_MBEANS { $res = JMXResource.root(); }
+    | ( K_MBEAN | K_MBEANS ) mbean { $res = JMXResource.mbean($mbean.text); }
     ;
 
 roleResource returns [RoleResource res]
@@ -1490,6 +1498,11 @@ username
     | QUOTED_NAME { addRecognitionError("Quoted strings are are not supported for user names and USER is deprecated, please use ROLE");}
     ;
 
+mbean
+    : IDENT
+    | STRING_LITERAL
+    ;
+
 // Basically the same as cident, but we need to exlude existing CQL3 types
 // (which for some reason are not reserved otherwise)
 non_type_ident returns [ColumnIdentifier id]
@@ -1625,6 +1638,16 @@ K_AUTHORIZE:   A U T H O R I Z E;
 K_DESCRIBE:    D E S C R I B E;
 K_EXECUTE:     E X E C U T E;
 K_NORECURSIVE: N O R E C U R S I V E;
+K_MBEAN:       M B E A N;
+K_MBEANS:      M B E A N S;
+K_MBREAD:      M B R E A D;
+K_MBWRITE:     M B J M X W R I T E;
+K_MBEXECUTE:   M B E X E C U T E;
+K_MBGET:       M B G E T;
+K_MBSET:       M B S E T;
+K_MBINVOKE:    M B I N V O K E;
+K_MBQUERYNAMES:M B Q U E R Y N A M E S;
+K_MBINSTANCEOF:M B I N S T A N C E O F;
 
 K_USER:        U S E R;
 K_USERS:       U S E R S;

@@ -26,6 +26,7 @@ import java.net.UnknownHostException;
 import java.rmi.registry.LocateRegistry;
 import java.rmi.server.RMIServerSocketFactory;
 import java.util.Collections;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.UUID;
@@ -34,22 +35,31 @@ import java.util.concurrent.TimeUnit;
 import javax.management.MBeanServer;
 import javax.management.ObjectName;
 import javax.management.StandardMBean;
+import javax.management.remote.JMXAuthenticator;
 import javax.management.remote.JMXConnectorServer;
 import javax.management.remote.JMXServiceURL;
+import javax.management.remote.MBeanServerForwarder;
 import javax.management.remote.rmi.RMIConnectorServer;
 
 import com.codahale.metrics.Meter;
 import com.codahale.metrics.MetricRegistryListener;
 import com.codahale.metrics.SharedMetricRegistries;
+
+import javax.rmi.ssl.SslRMIClientSocketFactory;
+import javax.rmi.ssl.SslRMIServerSocketFactory;
+
 import com.google.common.annotations.VisibleForTesting;
 import com.google.common.util.concurrent.Futures;
 import com.google.common.util.concurrent.ListenableFuture;
 import com.google.common.util.concurrent.Uninterruptibles;
+
 import org.apache.cassandra.metrics.DefaultNameFactory;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 import com.addthis.metrics3.reporter.config.ReporterConfig;
+
+import org.apache.cassandra.auth.JMXCassandraAuthorizer;
 import org.apache.cassandra.concurrent.*;
 import org.apache.cassandra.config.CFMetaData;
 import org.apache.cassandra.config.DatabaseDescriptor;
@@ -100,26 +110,142 @@ public class CassandraDaemon
 
     private static void maybeInitJmx()
     {
-        if (System.getProperty("com.sun.management.jmxremote.port") != null)
+        String jmxPort = System.getProperty("com.sun.management.jmxremote.port");
+        System.setProperty("java.rmi.server.randomIDs", "true");
+        if (jmxPort != null)
+        {
+            logger.info("JMX is enabled to receive remote connections on port: " + jmxPort);
+            // No action required since JVM will create a server for us
             return;
+        }
 
-        String jmxPort = System.getProperty("cassandra.jmx.local.port");
+        jmxPort = System.getProperty("cassandra.jmx.local.port");
+
         if (jmxPort == null)
-            return;
+        {
+            // Check for custom parameter
+            jmxPort = System.getProperty("cassandra.jmx.port");
+            if (jmxPort == null)
+            {
+                // No JMX server configured
+                logger.error("cassandra.jmx.local.port missing from cassandra-env.sh, unable to start local JMX service." + jmxPort);
+                return;
+            }
+            else
+            {
+                String host = System.getProperty("cassandra.jmx.host");
+                if (host == null)
+                {
+                    logger.warn("cassandra.jmx.host missing from cassandra-env.sh, unable to start JMX service." + jmxPort);
+                    return;
+                }
+                createJMXServer(jmxPort, host, false);
+            }
+        }
+        else
+        {
+            createJMXServer(jmxPort, null, true);
+        }
+    }
 
-        System.setProperty("java.rmi.server.hostname", InetAddress.getLoopbackAddress().getHostAddress());
-        RMIServerSocketFactory serverFactory = new RMIServerSocketFactoryImpl();
-        Map<String, ?> env = Collections.singletonMap(RMIConnectorServer.RMI_SERVER_SOCKET_FACTORY_ATTRIBUTE, serverFactory);
+    /**
+     *
+     * Creates a server programmatically. This allows us to set parameters which normally are
+     * inaccessable.
+     *
+     */
+    private static void createJMXServer(String jmxPort, String host, Boolean local)
+    {
+        StringBuffer url = new StringBuffer();
+        if (local)
+        {
+            logger.warn("JMX is not enabled to receive remote connections. Please see cassandra-env.sh for more info.");
+            host = InetAddress.getLoopbackAddress().getHostAddress();
+            url.append("service:jmx:");
+            url.append("rmi://localhost/jndi/");
+            url.append("rmi://localhost:").append(jmxPort).append("/jmxrmi");
+        }
+        else
+        {
+            if (host == null)
+            {
+                logger.info("cassandra.jmx.host missing, will listen to all interfaces" + jmxPort);
+                host = RMIServerSocketFactoryImpl.ALL_INTERFACES;
+            }
+            url.append("service:jmx:");
+            url.append("rmi://").append(host).append(":").append(jmxPort).append("/jndi/");
+            url.append("rmi://").append(host).append(":").append(jmxPort).append("/jmxrmi");
+        }
+        logger.info("Starting JMX server at: " + url.toString());
+        System.setProperty("java.rmi.server.hostname", host);
+
+        Map<String, Object> env = new HashMap<String, Object>();
         try
         {
-            LocateRegistry.createRegistry(Integer.valueOf(jmxPort), null, serverFactory);
-            JMXServiceURL url = new JMXServiceURL(String.format("service:jmx:rmi://localhost/jndi/rmi://localhost:%s/jmxrmi", jmxPort));
-            jmxServer = new RMIConnectorServer(url, env, ManagementFactory.getPlatformMBeanServer());
+            String ssl = System.getProperty("cassandra.jmx.ssl");
+            if (ssl != null)
+            {
+                // Create a SSL enabled server
+                String customCipher = System.getProperty("cassandra.jmx.ssl.enabled.cipher.suites");
+                String customProtocols = System.getProperty("cassandra.jmx.ssl.enabled.protocols");
+                String clientAuth = System.getProperty("cassandra.jmx.ssl.need.client.auth");
+                String[] ciphersuites = null;
+                String[] protocols = null;
+                if (customProtocols != null)
+                {
+                    System.setProperty("javax.rmi.ssl.client.enabledProtocols", customProtocols);
+                    protocols = customProtocols.split(",");
+                }
+                if (customCipher != null)
+                {
+                    System.setProperty("javax.rmi.ssl.client.enabledCipherSuites", customCipher);
+                    ciphersuites = customCipher.split(",");
+                }
+
+                SslRMIClientSocketFactory clientFactory = new SslRMIClientSocketFactory();
+                SslRMIServerSocketFactory serverFactory = new SslRMIServerSocketFactory(ciphersuites, protocols, Boolean.valueOf(clientAuth));
+                LocateRegistry.createRegistry(Integer.valueOf(jmxPort), clientFactory, serverFactory);
+                env.put(RMIConnectorServer.RMI_SERVER_SOCKET_FACTORY_ATTRIBUTE, serverFactory);
+                env.put(RMIConnectorServer.RMI_CLIENT_SOCKET_FACTORY_ATTRIBUTE, clientFactory);
+                env.put("com.sun.jndi.rmi.factory.socket", clientFactory);
+            }
+            else
+            {
+                RMIServerSocketFactory serverFactory = new RMIServerSocketFactoryImpl(host);
+                LocateRegistry.createRegistry(Integer.valueOf(jmxPort), null, serverFactory);
+                env.put(RMIConnectorServer.RMI_SERVER_SOCKET_FACTORY_ATTRIBUTE, serverFactory);
+            }
+
+            String authentication = System.getProperty("cassandra.jmx.authenticator");
+            if (authentication != null)
+            {
+                final JMXAuthenticator authenticator = FBUtilities.construct(authentication, "JMXAuthenticatorImpl");
+                env.put(JMXConnectorServer.AUTHENTICATOR, authenticator);
+            }
+            else
+            {
+                logger.info("cassandra.jmx.authenticator missing from cassandra-env.sh, unable to start with authentication." + jmxPort);
+            }
+            jmxServer = new RMIConnectorServer(
+                    new JMXServiceURL(url.toString()),
+                    env,
+                    ManagementFactory.getPlatformMBeanServer()
+                    );
+            String authorization = System.getProperty("cassandra.jmx.mbeanserverforwarder");
+            if (authorization != null)
+            {
+                MBeanServerForwarder mbsf = JMXCassandraAuthorizer.newProxyInstance(authorization);
+                jmxServer.setMBeanServerForwarder(mbsf);
+            }
             jmxServer.start();
         }
         catch (IOException e)
         {
             logger.error("Error starting local jmx server: ", e);
+        }
+        catch (ConfigurationException e)
+        {
+            logger.error("Could not create Authenticator: ", e);
         }
     }
 
