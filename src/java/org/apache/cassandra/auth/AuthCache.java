@@ -86,7 +86,8 @@ public class AuthCache<K, V> implements AuthCacheMBean
         {
             protected void afterExecute(Runnable r, Throwable t)
             {
-                // empty to avoid logging on background updates
+                // remove logging on background updates
+                DebuggableThreadPoolExecutor.maybeResetTraceSessionWrapper(r);
             }
         };
         this.cache = initCache(null);

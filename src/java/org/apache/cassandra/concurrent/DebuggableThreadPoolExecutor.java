@@ -193,7 +193,7 @@ public class DebuggableThreadPoolExecutor extends ThreadPoolExecutor implements 
         logExceptionsAfterExecute(r, t);
     }
 
-    protected static void maybeResetTraceSessionWrapper(Runnable r)
+    public static void maybeResetTraceSessionWrapper(Runnable r)
     {
         if (r instanceof LocalSessionWrapper)
         {
